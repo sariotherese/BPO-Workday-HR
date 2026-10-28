@@ -1,0 +1,36 @@
+// Run each statement separately in a queryset attached to the materialized graph.
+// Counts exclude the named manager. All demo workers are active.
+
+// Q1: How many direct reports does Director X have? One SOLID hop only.
+MATCH (e:Worker)-[:REPORTS_TO_SOLID]->(d:Worker WHERE d.worker_id = 'W_DIRX')
+RETURN count(DISTINCT e) AS direct_reports;
+
+// Q2: How many people roll up to Director X? All SOLID levels, excluding the Director.
+MATCH ACYCLIC (e:Worker)-[:REPORTS_TO_SOLID]->+(d:Worker WHERE d.worker_id = 'W_DIRX')
+RETURN count(DISTINCT e) AS total_headcount;
+
+// Q3: Break Director X's full SOLID organization down by management level.
+MATCH ACYCLIC (e:Worker)-[:REPORTS_TO_SOLID]->+(d:Worker WHERE d.worker_id = 'W_DIRX')
+LET management_level = e.management_level
+RETURN management_level, count(DISTINCT e) AS headcount
+GROUP BY management_level
+ORDER BY management_level;
+
+// Q4: How many people report to Director X on a dotted line? One DOTTED hop only.
+MATCH (e:Worker)-[:REPORTS_TO_DOTTED]->(d:Worker WHERE d.worker_id = 'W_DIRX')
+RETURN count(DISTINCT e) AS dotted_reports;
+
+// Q5: How many unique people reach Director X through SOLID or DOTTED lines at any level?
+MATCH ACYCLIC (e:Worker)-[:REPORTS_TO_SOLID|REPORTS_TO_DOTTED]->+(d:Worker WHERE d.worker_id = 'W_DIRX')
+RETURN count(DISTINCT e) AS combined_headcount;
+
+// Q6: What is W_TM_DEMO's upward SOLID chain to the CEO? One row per ancestor, not paths.
+MATCH ACYCLIC (e:Worker WHERE e.worker_id = 'W_TM_DEMO')-[:REPORTS_TO_SOLID]->+(m:Worker)
+LET management_level = m.management_level
+RETURN management_level, count(DISTINCT m) AS ancestor_count,
+       collect_list(DISTINCT m.worker_id) AS manager_ids,
+       collect_list(DISTINCT m.full_name) AS manager_names
+GROUP BY management_level
+ORDER BY CASE management_level
+    WHEN 'IS' THEN 1 WHEN 'OM' THEN 2 WHEN 'DIR' THEN 3
+    WHEN 'SVP' THEN 4 WHEN 'CEO' THEN 5 ELSE 6 END;
