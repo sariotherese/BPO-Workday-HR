@@ -1,0 +1,90 @@
+// Run in director_x_solid_semantic_model DAX query view.
+// Expected: 88, 87, 3, 84, 15, 0, 0, 0.
+EVALUATE
+ROW(
+    "Employees", [Employee Headcount],
+    "TotalReports", [Total SOLID Reports],
+    "DirectReports", [Direct SOLID Reports],
+    "IndirectReports", [Indirect SOLID Reports],
+    "Managers", [Manager Lookup Count],
+    "Orphans", [Manager Orphan Count],
+    "DuplicateManagers", [Duplicate Manager Keys],
+    "DuplicateEmployees", [Duplicate Employee Keys]
+)
+
+// Expected: 0, 0, 0, 1, 0, 3, 4, 1.
+EVALUATE
+ROW(
+    "BlankEmployeeKeys", COALESCE(COUNTROWS(FILTER(
+        director_x_solid_org, ISBLANK([worker_id]) || [worker_id] = ""
+    )), 0),
+    "BlankEmployeeManagerKeys", COALESCE(COUNTROWS(FILTER(
+        director_x_solid_org, ISBLANK([direct_manager_id]) || [direct_manager_id] = ""
+    )), 0),
+    "BlankLookupKeys", COALESCE(COUNTROWS(FILTER(
+        Managers, ISBLANK([manager_id]) || [manager_id] = ""
+    )), 0),
+    "ExternalManagerInLookup", CALCULATE(COUNTROWS(Managers), Managers[manager_id] = "W00002"),
+    "ExternalManagerInEmployees", COALESCE(CALCULATE(
+        [Employee Headcount], director_x_solid_org[worker_id] = "W00002"
+    ), 0),
+    "DirectorManagerFilter", CALCULATE([Employee Headcount], Managers[manager_id] = "W_DIRX"),
+    "OM2ManagerFilter", CALCULATE([Employee Headcount], Managers[manager_id] = "W_DIRX_OM2"),
+    "ExternalManagerFilter", CALCULATE([Employee Headcount], Managers[manager_id] = "W00002")
+)
+
+// Expected: DIR=1, OM=3, IS=10, TM=74.
+EVALUATE
+SUMMARIZECOLUMNS(
+    director_x_solid_org[management_level],
+    "Employees", [Employee Headcount]
+)
+
+// Expected: 87, 87, 0, 0, 0, 0, 0, 3.
+EVALUATE
+ROW(
+    "ReportingEdges", COUNTROWS(ReportingEdges),
+    "UniqueEdgeWorkers", DISTINCTCOUNT(ReportingEdges[worker_id]),
+    "DuplicateEdgeWorkers", COUNTROWS(ReportingEdges) - DISTINCTCOUNT(ReportingEdges[worker_id]),
+    "MissingWorkerEndpoints", COALESCE(COUNTROWS(EXCEPT(
+        VALUES(ReportingEdges[worker_id]), VALUES(director_x_solid_org[worker_id])
+    )), 0),
+    "MissingManagerEndpoints", COALESCE(COUNTROWS(EXCEPT(
+        VALUES(ReportingEdges[direct_manager_id]), VALUES(director_x_solid_org[worker_id])
+    )), 0),
+    "BlankEdgeKeys", COALESCE(COUNTROWS(FILTER(
+        ReportingEdges,
+        ISBLANK([worker_id]) || [worker_id] = ""
+            || ISBLANK([direct_manager_id]) || [direct_manager_id] = ""
+    )), 0),
+    "DirectorExternalEdges", COALESCE(COUNTROWS(FILTER(
+        ReportingEdges, [worker_id] = "W_DIRX"
+    )), 0),
+    "DirectDirectorEdges", COUNTROWS(FILTER(
+        ReportingEdges, [direct_manager_id] = "W_DIRX"
+    ))
+)
+
+// Expected: 25 described columns, 3 described tables, 8 described measures.
+EVALUATE
+ROW(
+    "DescribedColumns", COUNTROWS(FILTER(
+        INFO.VIEW.COLUMNS(),
+        [Table] IN {"director_x_solid_org", "Managers", "ReportingEdges"} && NOT ISBLANK([Description])
+    )),
+    "DescribedTables", COUNTROWS(FILTER(
+        INFO.VIEW.TABLES(),
+        [Name] IN {"director_x_solid_org", "Managers", "ReportingEdges"} && NOT ISBLANK([Description])
+    )),
+    "DescribedMeasures", COUNTROWS(FILTER(
+        INFO.VIEW.MEASURES(),
+        [Table] = "director_x_solid_org" && NOT ISBLANK([Description])
+    ))
+)
+
+// Expected: three Many-to-One relationships, OneDirection, State=Ready.
+// Employee_Immediate_Manager and ReportingEdge_Worker are active.
+// ReportingEdge_Manager is inactive to avoid competing employee-to-edge filter paths.
+// RelyOnReferentialIntegrity is false: integrity is validated, not assumed.
+EVALUATE
+INFO.VIEW.RELATIONSHIPS()
