@@ -1,11 +1,12 @@
 # Fabric PySpark: attach the demo Lakehouse as default, then run this whole file.
 # WARNING: rerunning resets all four demo tables, including re-org history.
+import argparse
+import csv
 import random
+import sys
 from datetime import date
+from pathlib import Path
 
-from pyspark.sql import SparkSession, functions as F
-
-spark = SparkSession.builder.getOrCreate()
 rng = random.Random(42)
 start_date = date(2026, 1, 1)
 titles = dict(CEO="CEO", SVP="Senior Vice President", DIR="Director",
@@ -65,47 +66,69 @@ for w in dotted_workers:
     manager = "W_DIRX" if w == forced else rng.choice(choices)
     lines.append((f"D_{w}", w, manager, "DOTTED", start_date, None, True))
 
-worker_schema = """worker_id string, full_name string, job_title string,
-management_level string, department string, region string, country string, is_active boolean"""
-line_schema = """line_id string, worker_id string, manager_id string, line_type string,
-effective_from date, effective_to date, is_current boolean"""
-worker = spark.createDataFrame(list(workers.values()), worker_schema)
-reporting_line = spark.createDataFrame(lines, line_schema)
-solid = reporting_line.filter("line_type = 'SOLID' AND is_current").select("worker_id", "manager_id")
-dotted = reporting_line.filter("line_type = 'DOTTED' AND is_current").select("worker_id", "manager_id")
+if "--csv-dir" in sys.argv:
+    # Local mode uses the identical generated records, with no Spark dependency.
+    parser = argparse.ArgumentParser(description="Export the seed-42 baseline as four CSV files.")
+    parser.add_argument("--csv-dir", required=True, type=Path)
+    output = parser.parse_args().csv_dir
+    output.mkdir(parents=True, exist_ok=True)
+    line_columns = ("line_id", "worker_id", "manager_id", "line_type",
+                    "effective_from", "effective_to", "is_current")
+    tables = [("worker", tuple(next(iter(workers.values()))), [tuple(w.values()) for w in workers.values()]),
+              ("reporting_line", line_columns, lines)]
+    for kind in ("SOLID", "DOTTED"):
+        tables.append((f"edge_reports_to_{kind.lower()}", ("worker_id", "manager_id"),
+                       [(r[1], r[2]) for r in lines if r[3] == kind and r[6]]))
+    for name, columns, rows in tables:
+        path = output / f"{name}.csv"
+        with path.open("w", newline="", encoding="utf-8") as handle:
+            writer = csv.writer(handle)
+            writer.writerow(columns)
+            writer.writerows([str(v).lower() if isinstance(v, bool) else v for v in row] for row in rows)
+        print(f"Wrote {len(rows):,} rows: {path.resolve()}")
+else:
+    from pyspark.sql import SparkSession, functions as F
 
-# Fail visibly rather than persist a broken hierarchy.
-assert worker.select("worker_id").distinct().count() == 10000
-assert reporting_line.select("line_id").distinct().count() == 10499
-assert solid.count() == 9999
-assert solid.groupBy("worker_id").count().filter("count != 1").count() == 0
-assert solid.filter("worker_id = 'W_CEO'").count() == 0
-assert dotted.count() == dotted.select("worker_id").distinct().count() == 500
-for table_name, frame in [("worker", worker), ("reporting_line", reporting_line),
-                          ("edge_reports_to_solid", solid), ("edge_reports_to_dotted", dotted)]:
-    frame.write.format("delta").mode("overwrite").saveAsTable(table_name)
+    spark = SparkSession.builder.getOrCreate()
+    worker_schema = """worker_id string, full_name string, job_title string,
+    management_level string, department string, region string, country string, is_active boolean"""
+    line_schema = """line_id string, worker_id string, manager_id string, line_type string,
+    effective_from date, effective_to date, is_current boolean"""
+    worker = spark.createDataFrame(list(workers.values()), worker_schema)
+    reporting_line = spark.createDataFrame(lines, line_schema)
+    solid = reporting_line.filter("line_type = 'SOLID' AND is_current").select("worker_id", "manager_id")
+    dotted = reporting_line.filter("line_type = 'DOTTED' AND is_current").select("worker_id", "manager_id")
 
+    # Fail visibly rather than persist a broken hierarchy.
+    assert worker.select("worker_id").distinct().count() == 10000
+    assert reporting_line.select("line_id").distinct().count() == 10499
+    assert solid.count() == 9999
+    assert solid.groupBy("worker_id").count().filter("count != 1").count() == 0
+    assert solid.filter("worker_id = 'W_CEO'").count() == 0
+    assert dotted.count() == dotted.select("worker_id").distinct().count() == 500
+    for table_name, frame in [("worker", worker), ("reporting_line", reporting_line),
+                              ("edge_reports_to_solid", solid), ("edge_reports_to_dotted", dotted)]:
+        frame.write.format("delta").mode("overwrite").saveAsTable(table_name)
 
-def subtree(root_id, edges):
-    visited = spark.createDataFrame([(root_id,)], "worker_id string")
-    frontier = visited
-    while frontier.limit(1).count():
-        frontier = (edges.alias("e").join(frontier.alias("f"),
-                    F.col("e.manager_id") == F.col("f.worker_id"))
-                    .select(F.col("e.worker_id").alias("worker_id")).distinct()
-                    .join(visited, "worker_id", "left_anti").localCheckpoint(eager=True))
-        visited = visited.union(frontier).localCheckpoint(eager=True)
-    return visited.filter(F.col("worker_id") != root_id)
+    def subtree(root_id, edges):
+        visited = spark.createDataFrame([(root_id,)], "worker_id string")
+        frontier = visited
+        while frontier.limit(1).count():
+            frontier = (edges.alias("e").join(frontier.alias("f"),
+                        F.col("e.manager_id") == F.col("f.worker_id"))
+                        .select(F.col("e.worker_id").alias("worker_id")).distinct()
+                        .join(visited, "worker_id", "left_anti").localCheckpoint(eager=True))
+            visited = visited.union(frontier).localCheckpoint(eager=True)
+        return visited.filter(F.col("worker_id") != root_id)
 
-
-descendants = subtree("W_DIRX", solid)
-assert subtree("W_CEO", solid).count() == 9999
-print("EXPECTED: current workers, excluding Director X himself; all workers are active.")
-print("Direct SOLID reports:", solid.filter("manager_id = 'W_DIRX'").count())
-print("Full SOLID subtree:", descendants.count())
-print("Full SOLID subtree by management_level:")
-descendants.join(worker, "worker_id").groupBy("management_level").count().orderBy("management_level").show()
-print("One-hop DOTTED reports:", dotted.filter("manager_id = 'W_DIRX'").count())
-print("DOTTED identities for the live 'Who' question:")
-dotted.filter("manager_id = 'W_DIRX'").join(worker, "worker_id").select("worker_id", "full_name").show()
-print("Sample TM for the upward-chain query: W_TM_DEMO")
+    descendants = subtree("W_DIRX", solid)
+    assert subtree("W_CEO", solid).count() == 9999
+    print("EXPECTED: current workers, excluding Director X himself; all workers are active.")
+    print("Direct SOLID reports:", solid.filter("manager_id = 'W_DIRX'").count())
+    print("Full SOLID subtree:", descendants.count())
+    print("Full SOLID subtree by management_level:")
+    descendants.join(worker, "worker_id").groupBy("management_level").count().orderBy("management_level").show()
+    print("One-hop DOTTED reports:", dotted.filter("manager_id = 'W_DIRX'").count())
+    print("DOTTED identities for the live 'Who' question:")
+    dotted.filter("manager_id = 'W_DIRX'").join(worker, "worker_id").select("worker_id", "full_name").show()
+    print("Sample TM for the upward-chain query: W_TM_DEMO")
