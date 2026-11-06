@@ -85,6 +85,104 @@ depth filter to return **88 employees including Director X**. The flattened
 columns avoid recursive SQL for this slice, but do not override the agent's
 response-size limits; inspect the executed query and request a full list.
 
+### EPMS sample CSV: 100 employees
+
+[epms_sample_100_employees.csv](data/epms_sample_100_employees.csv) is a separate
+synthetic sample with the exact **98 columns**, in their original order, from
+`epms_sample_columns.xlsx`. It preserves all 88 employees and SOLID reporting
+paths from the Director X baseline, then adds 12 dummy TMs under the existing
+ISs: **1 Director + 3 OMs + 10 ISs + 86 TMs = 100 employees**.
+Director X therefore has **99 reportees: 3 direct and 96 indirect** in this
+sample. The original 88-row CSV and live Fabric sources are not changed.
+See the [EPMS organization chart](epms_org_chart.md) for a hierarchy overview,
+branch headcounts, and the complete 100-employee reporting tree.
+
+Each employee has one row. `employee_id` corresponds to the baseline `worker_id`;
+`od`/`od_id` identify Director X, `om`/`om_id` identify the branch OM, and
+`is_name`/`is_id` identify the branch IS. OM and IS fields include their own
+manager row, as in the baseline. Exclude the selected manager's `employee_id`
+when counting their reportees. `hierarchy_code` contains the SOLID
+director-to-employee ID path separated by ` > `; the penultimate ID is the
+immediate manager, except for Director X, whose path contains only his own ID.
+`job_management_level` uses DIR, OM, IS, and TM; `management_type` is SOLID.
+Unused SOM/SOD levels, secondary client emails, and RC2 fields are blank.
+
+All employees are active; other attributes are simple dummy values, with
+reserved `example.com` email domains. Dates use `YYYY-MM-DD`, timestamps use
+UTC ISO 8601, and the snapshot date is **2026-11-06**. The file is UTF-8 with a
+BOM for Excel compatibility. Preserve IDs and hierarchy paths as text when
+importing. This file uses the separate EPMS artifacts below, not the original
+88-person semantic model or agent.
+
+### EPMS Fabric demo
+
+The EPMS demo uses these items in the
+[Task Us HR Demo folder](https://app.fabric.microsoft.com/groups/6d6350e8-6f22-4a8b-b06a-eb4a3b68dd23/list?experience=fabric-developer&subfolderId=105248)
+of the `smec-dataplatform-e5` workspace:
+
+| Artifact | Purpose |
+|---|---|
+| [epms_hr_lakehouse](https://app.fabric.microsoft.com/groups/6d6350e8-6f22-4a8b-b06a-eb4a3b68dd23/lakehouses/57bdc899-3e11-4ea3-8120-bb050ba6080e) | Stores the uploaded CSV and its one Delta table, `dbo.epms_solid_org`. |
+| [epms_hr_semantic_model](https://app.fabric.microsoft.com/groups/6d6350e8-6f22-4a8b-b06a-eb4a3b68dd23/modeling/cf8d7b27-7799-433c-b1ee-95a562600a94/modelView?experience=fabric-developer) | Direct Lake on OneLake; only `epms_solid_org`, with descriptions on all 98 columns. |
+| [epms_hr_ontology](https://app.fabric.microsoft.com/groups/6d6350e8-6f22-4a8b-b06a-eb4a3b68dd23/ontologies/0a4f37ad-0f96-4e94-bc95-10166fd4e1f7?experience=fabric-developer) | One Worker entity with all 98 properties, bound to the semantic model, plus a full-descendant business rule. |
+| [epms_hr_agent](https://app.fabric.microsoft.com/groups/6d6350e8-6f22-4a8b-b06a-eb4a3b68dd23/aiskills/982ce2b1-6a77-4791-b0a6-0efb9f05f8d7?experience=fabric-developer) | Draft agent using the ontology and its inherited semantic-model source. |
+
+Data flow: CSV -> Lakehouse Delta table -> single-table semantic model ->
+Worker ontology -> data agent. Neither the ontology nor the agent has a direct
+Lakehouse binding. Fabric-generated ontology Eventhouse/KQL and graph
+infrastructure is not an agent data source. There are no Managers or
+ReportingEdges tables and no reporting relationships in this EPMS ontology.
+
+The model has six described measures:
+
+- `Employee Headcount`: distinct employees in the current filter context.
+- `Total SOLID Reports`, `Direct SOLID Reports`, `Indirect SOLID Reports`:
+  counts for one selected `employee_id`, defaulting to `W_DIRX` when no single
+  employee key is selected. These intentionally restore the full employee table
+  before counting the selected manager's descendants. Resolve a manager first;
+  do not rely on the default for an unknown or ambiguous name.
+- `Duplicate Employee Keys`, `Blank Employee Keys`: data-quality checks.
+
+For attribute-filtered reportee subsets, explicitly filter descendant rows
+and use `Employee Headcount`, rather than assuming the three reportee measures
+retain employee attribute filters.
+
+For Director X, the complete reportee filter is
+`od_id = "W_DIRX" AND employee_id <> "W_DIRX"`. For other managers, convert
+`hierarchy_code` to a DAX path with `SUBSTITUTE(hierarchy_code, " > ", "|")`
+and use token-aware `PATHCONTAINS`, excluding the manager's own row. Direct
+reports have the manager as the penultimate path token; indirect reports are
+total descendants minus direct reports. No recursive relationship traversal
+or additional model table is needed.
+
+Run [epms_validation.dax](queries/epms_validation.dax) in the model's DAX query
+view. Live model checks returned 100 employees, 99 Director X reportees,
+3 direct, 96 indirect, zero duplicate/blank keys, one model table, 98 described
+columns, and six described measures. The full-list query returned 99 rows
+without `TOPN`. OM1/OM2/OM3 reportee totals were 30/36/30; their direct counts
+were 3/4/3.
+
+Agent regression prompts:
+
+1. "How many reportees does Director X have?" (all descendants, not just 3 OMs).
+2. "How many are direct and indirect? Include Director X in the headcount too."
+3. "Break down Director X's reportees by job management level."
+4. "How many reportees does OM2 have, direct and indirect?"
+5. "List every reportee under Director X with employee ID and name."
+
+Inspect the executed semantic-model queries and reconcile the complete list
+against the count. The agent instructions prohibit silent sampling or list
+truncation; check actual response limits again after changing data or prompts.
+
+The draft agent was tested against the live model: the unqualified Director X
+question returned **99 total, 3 direct, 96 indirect**. Additional tests returned
+**100 including Director X**, the **3 OM / 10 IS / 86 TM** reportee breakdown,
+and **36 total / 4 direct / 32 indirect** for OM2. Its complete-list response
+displayed **99 distinct employees**; every employee ID, full name, and level
+matched the CSV exactly. The executed DAX used the flattened Director X filter,
+excluded the director, and had no `TOPN` row cap. Model checks were also rerun
+successfully after reopening. The agent remains a draft; it was not published.
+
 ### Live Director X ontology
 
 The separate [director_x_solid_ontology](https://app.fabric.microsoft.com/groups/6d6350e8-6f22-4a8b-b06a-eb4a3b68dd23/ontologies/54a558dd-d7fa-4269-8a2c-6706f1723e4b?experience=fabric-developer)

@@ -1,0 +1,64 @@
+// Run in epms_hr_semantic_model DAX query view.
+// Expected: 100 employees, 99 reportees, 3 direct, 96 indirect, zero key defects.
+EVALUATE
+ROW(
+    "Employees", [Employee Headcount],
+    "TotalReports", [Total SOLID Reports],
+    "DirectReports", [Direct SOLID Reports],
+    "IndirectReports", [Indirect SOLID Reports],
+    "DuplicateEmployeeKeys", [Duplicate Employee Keys],
+    "BlankEmployeeKeys", [Blank Employee Keys]
+)
+
+// Expected: one table, 98 described columns, one described table, six described measures.
+EVALUATE
+ROW(
+    "ModelTables", COUNTROWS(INFO.VIEW.TABLES()),
+    "DescribedColumns", COUNTROWS(FILTER(
+        INFO.VIEW.COLUMNS(), [Table] = "epms_solid_org" && NOT ISBLANK([Description])
+    )),
+    "DescribedTables", COUNTROWS(FILTER(
+        INFO.VIEW.TABLES(), [Name] = "epms_solid_org" && NOT ISBLANK([Description])
+    )),
+    "DescribedMeasures", COUNTROWS(FILTER(
+        INFO.VIEW.MEASURES(), [Table] = "epms_solid_org" && NOT ISBLANK([Description])
+    ))
+)
+
+// Expected: DIR=1, OM=3, IS=10, TM=86.
+EVALUATE
+SUMMARIZECOLUMNS(
+    epms_solid_org[job_management_level],
+    "Employees", [Employee Headcount]
+)
+
+// Expected: 99/3/96, 30/3/27, 36/4/32, 30/3/27, 12/12/0, 0/0/0.
+// The measures use a single selected employee_id as manager and default to Director X.
+EVALUATE
+SUMMARIZECOLUMNS(
+    epms_solid_org[employee_id],
+    TREATAS(
+        {"W_DIRX", "W_DIRX_OM1", "W_DIRX_OM2", "W_DIRX_OM3", "W00005", "W_TM_DEMO"},
+        epms_solid_org[employee_id]
+    ),
+    "TotalReports", [Total SOLID Reports],
+    "DirectReports", [Direct SOLID Reports],
+    "IndirectReports", [Indirect SOLID Reports]
+)
+
+// Expected: 99 distinct employee IDs, including W_TM_DEMO, excluding W_DIRX.
+// A complete list, without TOPN or a fixed reporting-depth limit.
+EVALUATE
+SELECTCOLUMNS(
+    FILTER(
+        epms_solid_org,
+        epms_solid_org[od_id] = "W_DIRX" && epms_solid_org[employee_id] <> "W_DIRX"
+    ),
+    "employee_id", epms_solid_org[employee_id],
+    "full_name", epms_solid_org[full_name],
+    "job_management_level", epms_solid_org[job_management_level],
+    "om_id", epms_solid_org[om_id],
+    "is_id", epms_solid_org[is_id],
+    "hierarchy_code", epms_solid_org[hierarchy_code]
+)
+ORDER BY [hierarchy_code]
